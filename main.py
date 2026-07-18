@@ -2,8 +2,10 @@ import json
 import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
+import gradio as gr
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -26,7 +28,20 @@ from entity import (
     ChatRequest,
     ChatResponse,
 )
+from frontend import demo
 
+
+# ---------------------------------------------------------
+# Project paths
+# ---------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+CSS_PATH = BASE_DIR / "tripweaver.css"
+
+
+# ---------------------------------------------------------
+# Application lifespan
+# ---------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,6 +49,10 @@ async def lifespan(app: FastAPI):
     print("Database initialized")
     yield
 
+
+# ---------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------
 
 app = FastAPI(
     title="TripWeaver API",
@@ -51,11 +70,15 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------
+# LangGraph state
+# ---------------------------------------------------------
+
 def build_initial_state(
     message: str,
     session_id: str,
 ) -> dict[str, Any]:
-    """Build the shared LangGraph state using recent session history."""
+    """Build the LangGraph state using recent session history."""
 
     previous_messages = get_recent_chat_messages(
         session_id=session_id,
@@ -66,6 +89,7 @@ def build_initial_state(
         item["content"]
         for item in previous_messages
     ]
+
     flattened_messages.append(message)
 
     return {
@@ -100,12 +124,16 @@ def build_initial_state(
     }
 
 
+# ---------------------------------------------------------
+# Save workflow results
+# ---------------------------------------------------------
+
 def save_workflow_result(
     session_id: str,
     message: str,
     result: dict[str, Any],
 ) -> str:
-    """Persist the conversation and return the final visible response."""
+    """Save conversation and booking details."""
 
     response_text = result.get(
         "response_text",
@@ -166,19 +194,32 @@ def save_workflow_result(
     return response_text
 
 
+# ---------------------------------------------------------
+# Booking lookup
+# ---------------------------------------------------------
+
 _BOOKING_REFERENCE_PATTERN = re.compile(
     r"\bTW-\d{4}-[FHB]-[A-Z0-9]{6}\b",
     re.IGNORECASE,
 )
 
 
-def extract_booking_reference(message: str) -> str | None:
+def extract_booking_reference(
+    message: str,
+) -> str | None:
     match = _BOOKING_REFERENCE_PATTERN.search(message)
-    return match.group(0).upper() if match else None
+
+    if match:
+        return match.group(0).upper()
+
+    return None
 
 
-def format_booking_lookup(booking: dict) -> str:
+def format_booking_lookup(
+    booking: dict,
+) -> str:
     details = booking.get("details") or {}
+
     booking_type = str(
         booking.get("booking_type", "")
     ).lower()
@@ -190,13 +231,14 @@ def format_booking_lookup(booking: dict) -> str:
         f"{booking.get('customer_name', 'Not available')}\n"
         f"- **Email:** "
         f"{booking.get('customer_email', 'Not available')}\n"
-        f"- **Created:** {booking.get('created_at', 'Not available')}\n"
+        f"- **Created:** "
+        f"{booking.get('created_at', 'Not available')}\n"
     )
 
     if booking_type == "flight":
         return (
             common
-            + f"- **Type:** Flight\n"
+            + "- **Type:** Flight\n"
             + f"- **Airline:** "
             f"{details.get('airline', 'Unknown')}\n"
             + f"- **Flight:** "
@@ -214,7 +256,7 @@ def format_booking_lookup(booking: dict) -> str:
     if booking_type == "hotel":
         return (
             common
-            + f"- **Type:** Hotel\n"
+            + "- **Type:** Hotel\n"
             + f"- **Hotel:** "
             f"{details.get('hotel_name', 'Unknown')}\n"
             + f"- **City:** "
@@ -225,7 +267,10 @@ def format_booking_lookup(booking: dict) -> str:
             f"{details.get('check_out', 'Unknown')}\n"
         )
 
-    return common + f"- **Type:** {booking_type or 'Unknown'}\n"
+    return (
+        common
+        + f"- **Type:** {booking_type or 'Unknown'}\n"
+    )
 
 
 def handle_booking_lookup(
@@ -245,9 +290,10 @@ def handle_booking_lookup(
     if booking is None:
         response_text = (
             "## Booking not found\n\n"
-            f"I could not find `{booking_reference}` in this session.\n\n"
-            "Check the reference or open the browser session that "
-            "created the booking."
+            f"I could not find `{booking_reference}` "
+            "in this session.\n\n"
+            "Check the reference or open the browser session "
+            "that created the booking."
         )
     else:
         response_text = format_booking_lookup(booking)
@@ -257,6 +303,7 @@ def handle_booking_lookup(
         role="user",
         content=message,
     )
+
     save_chat_message(
         session_id=session_id,
         role="assistant",
@@ -265,7 +312,14 @@ def handle_booking_lookup(
 
     return response_text
 
-def validate_request(request: ChatRequest) -> tuple[str, str]:
+
+# ---------------------------------------------------------
+# Request validation
+# ---------------------------------------------------------
+
+def validate_request(
+    request: ChatRequest,
+) -> tuple[str, str]:
     message = request.message.strip()
     session_id = request.session_id.strip()
 
@@ -284,24 +338,34 @@ def validate_request(request: ChatRequest) -> tuple[str, str]:
     return message, session_id
 
 
+# ---------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------
+
 def stream_event(
     event_type: str,
     **payload: Any,
 ) -> bytes:
-    """Encode one newline-delimited JSON streaming event."""
+    """Create a newline-delimited JSON event."""
 
     event = {
         "type": event_type,
         **payload,
     }
+
     return (
-        json.dumps(event, ensure_ascii=False)
+        json.dumps(
+            event,
+            ensure_ascii=False,
+        )
         + "\n"
     ).encode("utf-8")
 
 
-def response_tokens(text: str) -> Iterator[str]:
-    """Split Markdown into small chunks while preserving whitespace."""
+def response_tokens(
+    text: str,
+) -> Iterator[str]:
+    """Split Markdown into small streaming chunks."""
 
     for token in re.findall(r"\S+\s*|\n", text):
         yield token
@@ -311,10 +375,7 @@ def stream_workflow(
     message: str,
     session_id: str,
 ) -> Iterator[bytes]:
-    """
-    Stream activity events immediately, run the LangGraph workflow,
-    then stream the final response progressively.
-    """
+    """Run the LangGraph workflow and stream its response."""
 
     try:
         yield stream_event(
@@ -346,6 +407,7 @@ def stream_workflow(
                 "done",
                 response=lookup_response,
             )
+
             return
 
         initial_state = build_initial_state(
@@ -362,18 +424,26 @@ def stream_workflow(
         result = graph.invoke(initial_state)
 
         intent = result.get("intent", "general")
-        sub_action = result.get("sub_action", "general")
+        sub_action = result.get(
+            "sub_action",
+            "general",
+        )
 
         if sub_action == "book":
             activity_message = "Confirming your booking..."
+
         elif intent == "hotel":
             activity_message = "Preparing hotel options..."
+
         elif intent == "flight":
             activity_message = "Preparing flight options..."
+
         elif intent == "planner":
             activity_message = (
-                "Combining flights, hotels, budget, and itinerary..."
+                "Combining flights, hotels, budget, "
+                "and itinerary..."
             )
+
         else:
             activity_message = "Preparing travel guidance..."
 
@@ -416,17 +486,16 @@ def stream_workflow(
         )
 
 
-@app.get("/")
-async def root():
-    return {
-        "application": "TripWeaver",
-        "status": "online",
-    }
-
+# ---------------------------------------------------------
+# FastAPI routes
+# ---------------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "application": "TripWeaver",
+    }
 
 
 @app.get("/hotels")
@@ -439,9 +508,14 @@ async def list_flights():
     return get_flights.invoke({})
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """Original non-streaming endpoint retained for compatibility."""
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+)
+async def chat(
+    request: ChatRequest,
+):
+    """Non-streaming chat endpoint."""
 
     message, session_id = validate_request(request)
 
@@ -464,14 +538,19 @@ async def chat(request: ChatRequest):
                 session_id=session_id,
             )
         )
+
     except Exception as exc:
         print(
             "Graph execution failed: "
             f"{type(exc).__name__}: {exc}"
         )
+
         raise HTTPException(
             status_code=500,
-            detail="The travel workflow could not be completed.",
+            detail=(
+                "The travel workflow could not "
+                "be completed."
+            ),
         ) from exc
 
     response_text = save_workflow_result(
@@ -488,8 +567,10 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
-    """Stream progress events and the final reply as NDJSON."""
+async def chat_stream(
+    request: ChatRequest,
+):
+    """Stream status events and response text as NDJSON."""
 
     message, session_id = validate_request(request)
 
@@ -510,7 +591,9 @@ async def chat_stream(request: ChatRequest):
     "/chat-history/{session_id}",
     response_model=ChatHistoryResponse,
 )
-async def read_chat_history(session_id: str):
+async def read_chat_history(
+    session_id: str,
+):
     return ChatHistoryResponse(
         session_id=session_id,
         messages=get_chat_history(session_id),
@@ -518,7 +601,9 @@ async def read_chat_history(session_id: str):
 
 
 @app.delete("/chat-history/{session_id}")
-async def delete_chat_history(session_id: str):
+async def delete_chat_history(
+    session_id: str,
+):
     clear_chat_history(session_id)
 
     return {
@@ -531,12 +616,36 @@ async def delete_chat_history(session_id: str):
     "/bookings/{session_id}",
     response_model=BookingHistoryResponse,
 )
-async def read_bookings(session_id: str):
+async def read_bookings(
+    session_id: str,
+):
     return BookingHistoryResponse(
         session_id=session_id,
         bookings=get_bookings(session_id),
     )
 
+
+# ---------------------------------------------------------
+# Mount Gradio frontend
+# ---------------------------------------------------------
+
+if not CSS_PATH.exists():
+    raise FileNotFoundError(
+        f"CSS file not found: {CSS_PATH}"
+    )
+
+app = gr.mount_gradio_app(
+    app=app,
+    blocks=demo,
+    path="/",
+    css_paths=CSS_PATH,
+    show_error=True,
+)
+
+
+# ---------------------------------------------------------
+# Local development
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

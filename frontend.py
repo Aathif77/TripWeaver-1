@@ -626,9 +626,8 @@ def create_ui():
 
     return demo
 
-
+demo = create_ui()
 def main():
-    demo = create_ui()
     demo.launch(
         share=False,
         debug=False,
