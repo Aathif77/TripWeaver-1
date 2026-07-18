@@ -1,0 +1,35 @@
+# Web Framework
+fastapi
+uvicorn
+
+# Frontend
+gradio
+
+# LangChain & LangGraph
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langgraph
+
+# OpenAI
+openai
+
+# Environment Variables
+python-dotenv
+
+# Data Validation
+pydantic
+
+# HTTP Client
+requests
+httpx
+
+# Database
+sqlalchemy
+
+# MCP SDK
+mcp
+
+# Utilities
+typing-extensions
